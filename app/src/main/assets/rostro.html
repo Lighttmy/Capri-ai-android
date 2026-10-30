@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Rostro</title>
+<style>
+  html,body{margin:0;height:100%;background:transparent;overflow:hidden;-webkit-tap-highlight-color:transparent;user-select:none}
+  #wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{width:100%;height:100%;object-fit:contain;transition:filter .25s}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="560" height="520"></canvas></div>
+<script>
+"use strict";
+// Rostro del asistente para la ventana emergente del móvil: solo la cara, con efecto glitch y animación de hablar.
+// API (la llama la app con evaluateJavascript): Rostro.mostrar(), Rostro.ocultar(), Rostro.estado(s), Rostro.silaba(f).
+// Estados: "reposo" | "escuchando" | "pensando" | "hablando".
+const Rostro = (() => {
+  const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const img = new Image();
+  let listo = false;
+  // versiones teñidas de la cara para la aberración cromática (se crean al cargar)
+  let cian = null, magenta = null;
+  const FX = 21, FY = 25;               // dónde se dibuja la cara dentro del lienzo (margen para los temblores)
+  const FW = 518, FH = 470;
+  const BOCA = { x: 262, y: 392 };      // centro de la boca (coordenadas de la imagen)
+
+  let est = "reposo", t = 0, ultimo = 0;
+  let apareciendo = 0, desapareciendo = 0;   // segundos restantes de la animación de entrada / salida
+  let visible = false;
+  let g = 0, rafaga = 0, proxRafaga = 1.2;   // intensidad del glitch, ráfaga en curso, tiempo hasta la siguiente
+  let silabaF = 0;                           // sacudida por sílaba (0..1)
+  let boca = 0, bocaObj = 0, proxBoca = 0;   // apertura de la boca
+  let barrido = 0;                           // barra de escaneo (escuchando)
+  let rng = 12345;
+  const rnd = () => (rng = (rng * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const R = (a, b) => a + (b - a) * rnd();
+
+  function teñir(color) {
+    const o = document.createElement("canvas"); o.width = FW; o.height = FH;
+    const c = o.getContext("2d");
+    c.drawImage(img, 0, 0);
+    c.globalCompositeOperation = "source-in";
+    c.fillStyle = color; c.fillRect(0, 0, FW, FH);
+    return o;
+  }
+  img.onload = () => {
+    cian = teñir("rgba(30,255,230,0.85)");
+    magenta = teñir("rgba(255,50,170,0.85)");
+    listo = true;
+    if (window.Android && Android.listo) Android.listo();
+  };
+  img.src = "rostro.png";
+
+  // líneas de escaneo (se recortan de la cara con destination-out)
+  const lineas = document.createElement("canvas"); lineas.width = 4; lineas.height = 4;
+  { const c = lineas.getContext("2d"); c.fillStyle = "rgba(0,0,0,0.30)"; c.fillRect(0, 0, 4, 1); }
+
+  function intensidadBase() {
+    switch (est) {
+      case "hablando": return 0.16 + 0.55 * silabaF;
+      case "pensando": return 0.38;
+      case "escuchando": return 0.10;
+      default: return 0.05;
+    }
+  }
+
+  function actualizar(dt) {
+    t += dt;
+    // ráfagas aleatorias de glitch: más frecuentes cuando piensa
+    proxRafaga -= dt;
+    if (proxRafaga <= 0) {
+      rafaga = est === "pensando" ? R(0.12, 0.35) : R(0.08, 0.22);
+      proxRafaga = est === "pensando" ? R(0.25, 0.7) : est === "hablando" ? R(0.7, 1.8) : R(1.4, 3.6);
+    }
+    if (rafaga > 0) rafaga -= dt;
+    silabaF = Math.max(0, silabaF - dt * 4.5);
+    let alvo = intensidadBase() + (rafaga > 0 ? 0.55 : 0);
+    if (apareciendo > 0) { apareciendo -= dt; alvo = Math.max(alvo, 1.0 * Math.min(1, apareciendo / 0.45) + 0.1); }
+    if (desapareciendo > 0) { desapareciendo -= dt; alvo = Math.max(alvo, 1.0 - Math.min(1, desapareciendo / 0.4) * 0.3); }
+    g += (alvo - g) * Math.min(1, dt * 18);
+    // boca: abre y cierra sin parar mientras habla, y la sílaba la abre de golpe
+    if (est === "hablando") {
+      proxBoca -= dt;
+      if (proxBoca <= 0) { bocaObj = rnd() < 0.2 ? 0.1 : R(0.35, 1); proxBoca = R(0.06, 0.16); }
+      if (silabaF > 0.8) bocaObj = 1;
+    } else bocaObj = 0;
+    boca += (bocaObj - boca) * Math.min(1, dt * 22);
+    if (est === "escuchando") barrido = (barrido + dt * 0.8) % 1;
+  }
+
+  function dibujar() {
+    ctx.clearRect(0, 0, W, H);
+    if (!listo || !visible) return;
+    let alfa = 1, esc = 1;
+    if (apareciendo > 0) { const f = 1 - apareciendo / 0.45; esc = 0.86 + 0.14 * Math.min(1, f * 1.2); alfa = rnd() < 0.25 ? 0.35 : Math.min(1, f * 2.2); }
+    if (desapareciendo > 0) { const f = desapareciendo / 0.4; alfa = Math.max(0, f) * (rnd() < 0.3 ? 0.5 : 1); esc = 0.9 + 0.1 * f; }
+    // movimiento del cuerpo: respiración, rebote por sílaba, ligera inclinación al escuchar
+    const resp = Math.sin(t * 1.8) * 3;
+    const rebote = est === "hablando" ? -10 * silabaF - 3 * Math.abs(Math.sin(t * 9)) : 0;
+    const incl = est === "escuchando" ? Math.sin(t * 1.3) * 0.025 : est === "pensando" ? Math.sin(t * 7) * 0.012 : 0;
+    ctx.save();
+    ctx.globalAlpha = alfa * (g > 0.7 && rnd() < 0.18 ? 0.55 : 1);
+    ctx.translate(W / 2, H / 2 + resp + rebote);
+    ctx.rotate(incl);
+    ctx.scale(esc * (1 + 0.035 * silabaF), esc * (1 - 0.05 * silabaF));
+    ctx.translate(-W / 2, -H / 2);
+
+    const sep = 3 + g * 16;                       // separación de los canales de color
+    const dx = (rnd() - 0.5) * g * 10;
+    // canales desplazados
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha *= 0.55 + g * 0.3;
+    ctx.drawImage(cian, FX - sep + dx, FY);
+    ctx.drawImage(magenta, FX + sep + dx, FY);
+    ctx.globalAlpha = alfa * (g > 0.7 && rnd() < 0.18 ? 0.55 : 1);
+    ctx.globalCompositeOperation = "source-over";
+
+    // cara en tiras horizontales: con glitch, algunas se desplazan de lado
+    const tiras = g > 0.12 ? Math.floor(3 + g * 12) : 0;
+    const desp = [];
+    for (let i = 0; i < tiras; i++) {
+      const y = Math.floor(R(0, FH - 8)), h = Math.floor(R(4, 10 + 46 * g));
+      desp.push([y, Math.min(h, FH - y), Math.round((rnd() - 0.5) * 2 * (8 + 70 * g))]);
+    }
+    ctx.drawImage(img, FX, FY);
+    for (const [y, h, s] of desp) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(FX - 60, FY + y, FW + 120, h); ctx.clip();
+      ctx.clearRect(FX - 60, FY + y, FW + 120, h);
+      ctx.drawImage(img, FX + s, FY);
+      if (rnd() < 0.35) { ctx.globalCompositeOperation = "lighter"; ctx.drawImage(rnd() < 0.5 ? cian : magenta, FX + s * 1.4, FY); }
+      ctx.restore();
+    }
+    dibujarBoca();
+    // barrido de escaneo al escuchar
+    if (est === "escuchando") {
+      const by = FY + barrido * FH;
+      ctx.save(); ctx.globalCompositeOperation = "source-atop";
+      const gr = ctx.createLinearGradient(0, by - 26, 0, by + 4);
+      gr.addColorStop(0, "rgba(57,255,136,0)"); gr.addColorStop(1, "rgba(57,255,136,0.55)");
+      ctx.fillStyle = gr; ctx.fillRect(0, by - 26, W, 30);
+      ctx.restore();
+    }
+    // bloques de ruido de colores, solo sobre la cara
+    if (g > 0.2) {
+      ctx.save(); ctx.globalCompositeOperation = "source-atop";
+      const n = Math.floor(g * 9);
+      for (let i = 0; i < n; i++) {
+        ctx.fillStyle = rnd() < 0.5 ? "rgba(57,255,136,0.7)" : "rgba(255,79,163,0.7)";
+        ctx.fillRect(FX + R(0, FW), FY + R(0, FH), R(6, 46), R(2, 9));
+      }
+      ctx.restore();
+    }
+    // líneas de escaneo
+    ctx.save(); ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = ctx.createPattern(lineas, "repeat"); ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // boca: un ecualizador de barras de neón sobre una pequeña pantalla oscura; se abre al hablar
+  function dibujarBoca() {
+    const cx = FX + BOCA.x, cy = FY + BOCA.y;
+    const barras = 7, ancho = 11, sepB = 5;
+    const total = barras * ancho + (barras - 1) * sepB;
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    // placa oscura con borde rosa, para que se lea sobre el pelo y los parches verdes
+    const pw = total + 26, ph = 30 + 40 * boca;
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(10,4,22,0.9)"; ctx.fillRect(cx - pw / 2, cy - ph / 2, pw, ph);
+    ctx.strokeStyle = "rgba(255,79,163,0.9)"; ctx.lineWidth = 3; ctx.strokeRect(cx - pw / 2, cy - ph / 2, pw, ph);
+    for (let i = 0; i < barras; i++) {
+      const centro = 1 - Math.abs(i - (barras - 1) / 2) / ((barras - 1) / 2);   // las del centro, más altas
+      const ruido = est === "hablando" ? 0.55 + 0.45 * Math.sin(t * (14 + i * 3.1) + i) : 1;
+      const alto = 4 + (8 + 40 * centro) * boca * Math.abs(ruido);
+      const x = cx - total / 2 + i * (ancho + sepB);
+      ctx.shadowColor = "rgba(57,255,136,0.95)"; ctx.shadowBlur = 8 + 10 * boca;
+      ctx.fillStyle = boca > 0.6 && i % 2 ? "#ff4fa3" : "#39ff88";
+      ctx.fillRect(x, cy - alto / 2, ancho, alto);
+    }
+    ctx.restore();
+  }
+
+  function bucle(ts) {
+    requestAnimationFrame(bucle);
+    if (!visible) { ultimo = ts; return; }
+    if (ts - ultimo < 30) return;                 // ~30 fps: suficiente y ahorra batería
+    const dt = Math.min(0.1, (ts - ultimo) / 1000 || 0.033);
+    ultimo = ts;
+    actualizar(dt);
+    dibujar();
+    if (desapareciendo <= 0 && !ocultoNotificado && cierrePedido) {
+      ocultoNotificado = true; visible = false; ctx.clearRect(0, 0, W, H);
+      if (window.Android && Android.ocultado) Android.ocultado();
+    }
+  }
+  let ocultoNotificado = false, cierrePedido = false;
+  requestAnimationFrame(bucle);
+
+  cv.addEventListener("click", () => { if (window.Android && Android.tocado) Android.tocado(); });
+
+  return {
+    mostrar() { visible = true; cierrePedido = false; ocultoNotificado = false; desapareciendo = 0; apareciendo = 0.45; est = "escuchando"; },
+    ocultar() { if (!visible) { if (window.Android && Android.ocultado) Android.ocultado(); return; } cierrePedido = true; ocultoNotificado = false; desapareciendo = 0.4; est = "reposo"; },
+    estado(s) { if (["reposo", "escuchando", "pensando", "hablando"].includes(s)) est = s; cv.style.filter = s === "pensando" ? "hue-rotate(55deg) saturate(1.2)" : "none"; },
+    silaba(f) { silabaF = Math.max(silabaF, Math.min(1, f === undefined ? 1 : f)); },
+    // para las pruebas en el navegador
+    _est: () => ({ est, g, boca, visible, listo }),
+    _fijar(o) { if ("g" in o) g = o.g; if ("t" in o) t = o.t; },
+  };
+})();
+window.Rostro = Rostro;
+</script>
+</body>
+</html>

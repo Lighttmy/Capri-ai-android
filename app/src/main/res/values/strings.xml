@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Asistente IA</string>
+    <string name="desc_accesibilidad">Permite al asistente pulsar Inicio, Atrás, Recientes, bloquear la pantalla y hacer capturas cuando se lo pides. No lee el contenido de tu pantalla.</string>
+</resources>
