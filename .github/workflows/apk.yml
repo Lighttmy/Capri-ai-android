@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,3 +28,10 @@ jobs:
         with:
           name: AsistenteIA-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Publicar APK en Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AsistenteIA.apk
+          gh release delete apk-ultimo --yes --cleanup-tag 2>/dev/null || true
+          gh release create apk-ultimo AsistenteIA.apk --title "APK (última compilación)" --notes "APK de depuración del Asistente IA. Instálalo en el móvil permitiendo apps de origen desconocido."
