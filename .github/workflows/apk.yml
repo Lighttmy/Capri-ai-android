@@ -12,7 +12,16 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.9" }
-      - run: gradle :app:assembleDebug --no-daemon
+      - name: Compilar
+        run: |
+          set +e
+          gradle :app:assembleDebug --no-daemon --console=plain --stacktrace > build.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            grep -nE "^e: |error:|What went wrong|Caused by|FAILED|Could not|AndroidX|licen" build.log | head -25 | while IFS= read -r l; do echo "::error title=gradle::${l:0:400}"; done
+            tail -n 15 build.log | while IFS= read -r l; do echo "::warning title=fin-log::${l:0:300}"; done
+          fi
+          exit $code
       - uses: actions/upload-artifact@v4
         with:
           name: AsistenteIA-debug-apk
